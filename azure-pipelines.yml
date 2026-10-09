@@ -1,0 +1,373 @@
+trigger: none
+
+pool:
+  name: Ankit-DevSecOps-Pool
+
+parameters:
+  - name: scanCholbo
+    displayName: Run Code Quality and Security Scans
+    type: boolean
+    default: true
+
+  - name: planCholbo
+    displayName: Run Terraform Plan
+    type: boolean
+    default: true
+
+  - name: applyCholbo
+    displayName: Apply Terraform Changes
+    type: boolean
+    default: false
+
+variables:
+  terraformDirectory: '$(System.DefaultWorkingDirectory)/Environment/Preprod'
+  serviceConnection: 'Ankit-DevSecOps-ServiceConnection'
+  subscriptionId: 'eacc5e4e-04a0-479c-b82a-f5b2d1b21f47'
+  backendResourceGroup: 'rg-terraform-preprod'
+  backendStorageAccount: 'stterraformpreprod6543'
+  backendContainer: 'tfstate'
+  backendKey: 'terraform.tfstate'
+
+stages:
+
+# --------------------------------------------------
+# STAGE 1: CODE QUALITY
+# --------------------------------------------------
+- stage: CodeQuality
+  displayName: Code Quality
+  condition: and(succeeded(), eq(${{ parameters.scanCholbo }}, true))
+  jobs:
+    - job: TFLintJob
+      displayName: TFLint Scan
+      steps:
+        - checkout: self
+
+        - task: PowerShell@2
+          displayName: Verify TFLint Installation
+          inputs:
+            targetType: inline
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $tflint = "$env:USERPROFILE\tflint\tflint.exe"
+
+              if (-not (Test-Path $tflint)) {
+                  throw "TFLint not found at $tflint"
+              }
+
+              & $tflint --version
+              if ($LASTEXITCODE -ne 0) {
+                  throw "TFLint version check failed"
+              }
+
+        - task: PowerShell@2
+          displayName: Run TFLint
+          inputs:
+            targetType: inline
+            workingDirectory: '$(terraformDirectory)'
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $tflint = "$env:USERPROFILE\tflint\tflint.exe"
+
+              if (-not (Test-Path $tflint)) {
+                  throw "TFLint executable not found"
+              }
+
+              & $tflint --init
+              if ($LASTEXITCODE -ne 0) {
+                  throw "TFLint initialization failed"
+              }
+
+              & $tflint --recursive
+              if ($LASTEXITCODE -ne 0) {
+                  throw "TFLint scan failed"
+              }
+
+# --------------------------------------------------
+# STAGE 2: ADDITIONAL LINTER PLACEHOLDER
+# --------------------------------------------------
+- stage: SuperLinter
+  displayName: Super-Linter
+  dependsOn: CodeQuality
+  condition: succeeded()
+  jobs:
+    - job: SuperLinterJob
+      displayName: Super-Linter Check
+      steps:
+        - checkout: self
+
+        - task: PowerShell@2
+          displayName: Check Super-Linter Prerequisites
+          inputs:
+            targetType: inline
+            script: |
+              Write-Host "Super-Linter stage is reserved."
+              Write-Host "Docker or a supported runner must be configured."
+              Write-Host "Actual Super-Linter scan is not enabled yet."
+
+# --------------------------------------------------
+# STAGE 3: IAC SECURITY SCANS
+# --------------------------------------------------
+- stage: IaCSecurity
+  displayName: IaC Security Scans
+  dependsOn: SuperLinter
+  condition: succeeded()
+  jobs:
+    - job: SecurityScans
+      displayName: Terraform Security Tools
+      steps:
+        - checkout: self
+
+        - task: PowerShell@2
+          displayName: Run tfsec
+          continueOnError: false
+          inputs:
+            targetType: inline
+            workingDirectory: '$(terraformDirectory)'
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $tfsec = Get-Command tfsec -ErrorAction SilentlyContinue
+
+              if (-not $tfsec) {
+                  Write-Host "tfsec is not installed; scan skipped for now."
+                  Write-Host "Install/configure tfsec before enabling this check."
+                  exit 0
+              }
+
+              & $tfsec.Source .
+              if ($LASTEXITCODE -ne 0) {
+                  throw "tfsec reported findings or failed"
+              }
+
+        - task: PowerShell@2
+          displayName: Run Checkov
+          inputs:
+            targetType: inline
+            workingDirectory: '$(terraformDirectory)'
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $checkov = Get-Command checkov -ErrorAction SilentlyContinue
+
+              if (-not $checkov) {
+                  Write-Host "Checkov is not installed; scan skipped for now."
+                  exit 0
+              }
+
+              & $checkov.Source -d . --framework terraform
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Checkov reported findings or failed"
+              }
+
+        - task: PowerShell@2
+          displayName: Run Trivy IaC Scan
+          inputs:
+            targetType: inline
+            workingDirectory: '$(terraformDirectory)'
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $trivy = Get-Command trivy -ErrorAction SilentlyContinue
+
+              if (-not $trivy) {
+                  Write-Host "Trivy is not installed; scan skipped for now."
+                  exit 0
+              }
+
+              & $trivy.Source config --exit-code 1 --severity HIGH,CRITICAL .
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Trivy reported HIGH/CRITICAL findings or failed"
+              }
+
+        - task: PowerShell@2
+          displayName: KICS Scan Placeholder
+          inputs:
+            targetType: inline
+            script: |
+              Write-Host "KICS scan is not enabled yet."
+              Write-Host "Configure a supported KICS runner before enabling it."
+
+        - task: PowerShell@2
+          displayName: Snyk IaC Scan Placeholder
+          inputs:
+            targetType: inline
+            script: |
+              Write-Host "Snyk IaC scan is not enabled yet."
+              Write-Host "Configure Snyk CLI and the secret SNYK_TOKEN variable."
+
+# --------------------------------------------------
+# STAGE 4: POLICY AS CODE
+# --------------------------------------------------
+- stage: PolicyCheck
+  displayName: OPA and Conftest
+  dependsOn: IaCSecurity
+  condition: succeeded()
+  jobs:
+    - job: ConftestJob
+      displayName: Conftest Policy Check
+      steps:
+        - checkout: self
+
+        - task: PowerShell@2
+          displayName: Run Conftest If Configured
+          inputs:
+            targetType: inline
+            workingDirectory: '$(terraformDirectory)'
+            script: |
+              $ErrorActionPreference = 'Stop'
+              $conftest = Get-Command conftest -ErrorAction SilentlyContinue
+
+              if (-not $conftest) {
+                  Write-Host "Conftest is not installed; policy check skipped."
+                  exit 0
+              }
+
+              if (-not (Test-Path "./policy")) {
+                  Write-Host "No policy folder found; policy check skipped."
+                  exit 0
+              }
+
+              Write-Host "Conftest requires Terraform plan JSON input."
+              Write-Host "Plan-based policy evaluation will be configured next."
+
+# --------------------------------------------------
+# STAGE 5: TERRAFORM INIT AND VALIDATE
+# --------------------------------------------------
+- stage: TerraformValidate
+  displayName: Terraform Init and Validate
+  dependsOn: PolicyCheck
+  condition: succeeded()
+  jobs:
+    - job: ValidateJob
+      displayName: Init and Validate
+      steps:
+        - checkout: self
+
+        - task: TerraformTask@5
+          displayName: Terraform Init
+          inputs:
+            provider: azurerm
+            command: init
+            workingDirectory: '$(terraformDirectory)'
+            backendServiceArm: '$(serviceConnection)'
+            backendAzureRmOverrideSubscriptionID: '$(subscriptionId)'
+            backendAzureRmResourceGroupName: '$(backendResourceGroup)'
+            backendAzureRmStorageAccountName: '$(backendStorageAccount)'
+            backendAzureRmContainerName: '$(backendContainer)'
+            backendAzureRmKey: '$(backendKey)'
+
+        - task: TerraformTask@5
+          displayName: Terraform Validate
+          inputs:
+            provider: azurerm
+            command: validate
+            workingDirectory: '$(terraformDirectory)'
+
+# --------------------------------------------------
+# STAGE 6: TERRAFORM PLAN
+# --------------------------------------------------
+- stage: TerraformPlan
+  displayName: Terraform Plan
+  dependsOn: TerraformValidate
+  condition: and(succeeded(), eq(${{ parameters.planCholbo }}, true))
+  jobs:
+    - job: PlanJob
+      displayName: Create Terraform Plan
+      steps:
+        - checkout: self
+
+        - task: TerraformTask@5
+          displayName: Terraform Plan
+          inputs:
+            provider: azurerm
+            command: plan
+            workingDirectory: '$(terraformDirectory)'
+            environmentServiceNameAzureRM: '$(serviceConnection)'
+            environmentAzureRmOverrideSubscriptionID: '$(subscriptionId)'
+            commandOptions: '-out=$(Build.ArtifactStagingDirectory)/tfplan'
+
+        - task: PublishPipelineArtifact@1
+          displayName: Publish Terraform Plan
+          inputs:
+            targetPath: '$(Build.ArtifactStagingDirectory)/tfplan'
+            artifact: 'terraform-plan'
+            publishLocation: pipeline
+
+# --------------------------------------------------
+# STAGE 7: MANUAL APPROVAL
+# --------------------------------------------------
+- stage: ManualApproval
+  displayName: Manual Approval Before Apply
+  dependsOn: TerraformPlan
+  condition: and(succeeded(), eq(${{ parameters.applyCholbo }}, true))
+  jobs:
+    - job: ApprovalJob
+      displayName: Wait for Approval
+      pool: server
+      timeoutInMinutes: 1440
+      steps:
+        - task: ManualValidation@1
+          timeoutInMinutes: 1440
+          inputs:
+            notifyUsers: ''
+            approvers: ''
+            allowApproversToApproveTheirOwnRuns: true
+            instructions: 'Review the Terraform plan and approve only if the proposed changes are correct.'
+            onTimeout: reject
+
+# --------------------------------------------------
+# STAGE 8: TERRAFORM APPLY
+# --------------------------------------------------
+- stage: TerraformApply
+  displayName: Terraform Apply
+  dependsOn: ManualApproval
+  condition: and(succeeded(), eq(${{ parameters.applyCholbo }}, true))
+  jobs:
+    - job: ApplyJob
+      displayName: Apply Approved Terraform Plan
+      steps:
+        - checkout: self
+        - download: current
+          artifact: terraform-plan
+
+        - task: PowerShell@2
+          displayName: Verify Plan Artifact
+          inputs:
+            targetType: inline
+            script: |
+              $plan = "$(Pipeline.Workspace)\terraform-plan\tfplan"
+
+              if (-not (Test-Path $plan)) {
+                  throw "Saved Terraform plan not found: $plan"
+              }
+
+              Write-Host "Saved plan artifact found."
+
+        - task: TerraformTask@5
+          displayName: Apply Terraform Plan
+          inputs:
+            provider: azurerm
+            command: apply
+            workingDirectory: '$(terraformDirectory)'
+            environmentServiceNameAzureRM: '$(serviceConnection)'
+            environmentAzureRmOverrideSubscriptionID: '$(subscriptionId)'
+            commandOptions: '$(Pipeline.Workspace)/terraform-plan/tfplan'
+
+# --------------------------------------------------
+# STAGE 9: COST ANALYSIS PLACEHOLDER
+# --------------------------------------------------
+- stage: OpenCost
+  displayName: OpenCost
+  dependsOn: TerraformApply
+  condition: succeeded()
+  jobs:
+    - job: OpenCostJob
+      displayName: Cost Analysis Placeholder
+      steps:
+        - checkout: self
+
+        - task: PowerShell@2
+          displayName: OpenCost Setup Reminder
+          inputs:
+            targetType: inline
+            script: |
+              Write-Host "OpenCost integration is not enabled."
+              Write-Host "OpenCost needs a supported cost-data source."
+              Write-Host "Configure this stage when the required environment is available."
